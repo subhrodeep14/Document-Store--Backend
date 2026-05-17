@@ -1,276 +1,928 @@
-// backend/controllers/entry.controller.js
-'use strict';
+const {
+  PrismaClient,
+} = require("@prisma/client");
 
-const { PrismaClient } = require('@prisma/client');
-const { z } = require('zod');
-const path = require('path');
-const fs = require('fs');
+const {
+  generateCompanyCode,
+} = require("../utils/generateCompanyCode");
 
-const prisma = new PrismaClient();
+const generatePurposeCode =
+  require("../utils/generatePurposeCode");
 
-// ─── Validation Schema ────────────────────────────────────────────────────────
-const createEntrySchema = z.object({
-  slNo: z
-    .union([z.number().int().positive(), z.string().regex(/^\d+$/).transform(Number)])
-    .refine((v) => v > 0, 'SL No must be a positive integer'),
-  senderName: z.string().min(1, 'Sender name required').max(200).trim(),
-  senderCode: z
-    .string()
-    .min(1, 'Sender code required')
-    .max(20)
-    .trim()
-    .toUpperCase(),
-  receiverName: z.string().min(1, 'Receiver name required').max(200).trim(),
-  receiverCode: z
-    .string()
-    .min(1, 'Receiver code required')
-    .max(20)
-    .trim()
-    .toUpperCase(),
-  purpose: z.string().min(1, 'Purpose required').max(300).trim(),
-  description: z.string().min(1, 'Description required').max(5000).trim(),
-  sendCount: z
-    .union([z.number().int().positive(), z.string().regex(/^\d+$/).transform(Number)])
-    .refine((v) => v >= 1 && v <= 999, 'Send count must be between 1 and 999'),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD'),
-});
+const prisma =
+  new PrismaClient();
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+/*
+──────────────────────────────────────
+HELPERS
+──────────────────────────────────────
+*/
 
-/**
- * Generate memo number: MEMO-[YEAR]-[SLNO padded 4]-[COMPANYCODE]-[COUNT padded 2]
- * Count is based on how many times the SAME senderCode OR receiverCode appears
- */
-async function generateMemoNumber(tx, { year, slNo, senderCode, date }) {
-  // Count prior entries for this sender company (regardless of date)
-  const existingCount = await tx.entry.count({
-    where: {
-      senderCode: senderCode.toUpperCase(),
-    },
-  });
+/*
+GET OR CREATE COMPANY
+*/
 
-  const count = existingCount + 1; // This entry will be count+1
-  const slPadded = String(slNo).padStart(4, '0');
-  const countPadded = String(count).padStart(2, '0');
-  const code = senderCode.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+async function getOrCreateCompany(
+  companyName
+) {
+  try {
+    const cleanName =
+      companyName.trim();
 
-  return `MEMO-${year}-${slPadded}-${code}-${countPadded}`;
+    /*
+    EXISTING
+    */
+
+    let company =
+      await prisma.company.findFirst(
+        {
+          where: {
+            name: {
+              equals:
+                cleanName,
+
+              mode:
+                "insensitive",
+            },
+          },
+        }
+      );
+
+    if (company) {
+      return company;
+    }
+
+    /*
+    GENERATE CODE
+    */
+
+    const code =
+      await generateCompanyCode(
+        cleanName
+      );
+
+    /*
+    RANDOM ADMIN/EMP CODES
+    */
+
+    const random =
+      Math.random()
+        .toString(36)
+        .substring(2, 8)
+        .toUpperCase();
+
+    /*
+    CREATE
+    */
+
+    company =
+      await prisma.company.create(
+        {
+          data: {
+            name:
+              cleanName,
+
+            code,
+
+            adminCode:
+              `ADM-${random}`,
+
+            employeeCode:
+              `EMP-${random}`,
+          },
+        }
+      );
+
+    return company;
+  } catch (err) {
+    console.error(
+      "GET OR CREATE COMPANY ERROR:",
+      err
+    );
+
+    throw err;
+  }
 }
 
-// ─── Controller: Get SL Options ───────────────────────────────────────────────
-const getSlOptions = async (req, res, next) => {
+/*
+GET OR CREATE PURPOSE
+*/
+
+async function getOrCreatePurpose(
+  purposeName
+) {
   try {
-    // Get all used SL numbers
-    const usedEntries = await prisma.entry.findMany({
-      select: { slNo: true },
-      orderBy: { slNo: 'asc' },
-    });
+    const cleanName =
+      purposeName.trim();
 
-    const usedSet = new Set(usedEntries.map((e) => e.slNo));
+    /*
+    EXISTING
+    */
 
-    // Find the highest used SL number
-    const maxUsed = usedEntries.length > 0 ? Math.max(...usedEntries.map((e) => e.slNo)) : 0;
+    let purpose =
+      await prisma.purpose.findFirst(
+        {
+          where: {
+            name: {
+              equals:
+                cleanName,
 
-    // Build next 30 available sequential slots from max+1
-    const nextSlots = [];
-    let candidate = maxUsed + 1;
-    while (nextSlots.length < 30) {
-      if (!usedSet.has(candidate)) nextSlots.push(candidate);
-      candidate++;
-    }
-
-    // Find "gap" SL numbers (previously skipped / unused slots below maxUsed)
-    const gaps = [];
-    for (let i = 1; i <= maxUsed; i++) {
-      if (!usedSet.has(i)) gaps.push(i);
-    }
-
-    res.json({
-      nextAvailable: nextSlots[0] ?? 1,
-      nextSlots,      // Next 30 sequential available
-      gaps,           // Unused previous numbers
-      usedCount: usedSet.size,
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-// ─── Controller: Create Entry ─────────────────────────────────────────────────
-const createEntry = async (req, res, next) => {
-  try {
-    // Parse body (form-data when file is present)
-    const bodyRaw = {
-      slNo: req.body.slNo,
-      senderName: req.body.senderName,
-      senderCode: req.body.senderCode,
-      receiverName: req.body.receiverName,
-      receiverCode: req.body.receiverCode,
-      purpose: req.body.purpose,
-      description: req.body.description,
-      sendCount: req.body.sendCount,
-      date: req.body.date,
-    };
-
-    const parsed = createEntrySchema.safeParse(bodyRaw);
-    if (!parsed.success) {
-      // Clean up uploaded file if validation fails
-      if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      return res.status(400).json({
-        error: 'Validation failed',
-        details: parsed.error.flatten().fieldErrors,
-      });
-    }
-
-    const data = parsed.data;
-    const entryDate = new Date(data.date);
-    const year = entryDate.getFullYear();
-
-    // ── Validate file if present ──────────────────────────────────────────────
-    let fileData = null;
-    if (req.file) {
-      const allowedMimes = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
-      if (!allowedMimes.includes(req.file.mimetype)) {
-        fs.unlinkSync(req.file.path);
-        return res.status(400).json({ error: 'Only PDF and image files (JPG, PNG, WEBP) are allowed' });
-      }
-      fileData = {
-        filePath: req.file.path,
-        fileName: req.file.originalname.slice(0, 255),
-        fileMime: req.file.mimetype,
-        fileUrl: `/api/entry/file/${path.basename(req.file.filename || req.file.path)}`,
-      };
-    }
-
-    // ── Prisma transaction ────────────────────────────────────────────────────
-    const entry = await prisma.$transaction(async (tx) => {
-      // 1. Check SL number uniqueness
-      const existingSl = await tx.entry.findUnique({ where: { slNo: data.slNo } });
-      if (existingSl) {
-        throw Object.assign(new Error(`SL No ${data.slNo} is already taken`), { statusCode: 409 });
-      }
-
-      // 2. Generate memo number
-      const memoNumber = await generateMemoNumber(tx, {
-        year,
-        slNo: data.slNo,
-        senderCode: data.senderCode,
-        date: entryDate,
-      });
-
-      // 3. Record SL counter
-      await tx.slCounter.upsert({
-        where: { value: data.slNo },
-        update: { usedAt: new Date() },
-        create: { value: data.slNo },
-      });
-
-      // 4. Create entry
-      return tx.entry.create({
-        data: {
-          slNo: data.slNo,
-          memoNumber,
-          senderName: data.senderName,
-          senderCode: data.senderCode.toUpperCase(),
-          receiverName: data.receiverName,
-          receiverCode: data.receiverCode.toUpperCase(),
-          purpose: data.purpose,
-          description: data.description,
-          sendCount: data.sendCount,
-          date: entryDate,
-          ...fileData,
-        },
-      });
-    });
-
-    res.status(201).json({ entry, message: 'Entry created successfully' });
-  } catch (err) {
-    // Clean up file on error
-    if (req.file?.path && fs.existsSync(req.file.path)) {
-      try { fs.unlinkSync(req.file.path); } catch (_) {}
-    }
-    next(err);
-  }
-};
-
-// ─── Controller: Get Entries By Date ─────────────────────────────────────────
-const getEntriesByDate = async (req, res, next) => {
-  try {
-    const { date } = req.query;
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({ error: 'Invalid date. Use YYYY-MM-DD' });
-    }
-
-    const entries = await prisma.entry.findMany({
-      where: { date: new Date(date) },
-      orderBy: { slNo: 'asc' },
-    });
-
-    res.json({ entries });
-  } catch (err) {
-    next(err);
-  }
-};
-
-// ─── Controller: Stream File ──────────────────────────────────────────────────
-const getEntryFile = async (req, res, next) => {
-  try {
-    const { filename } = req.params;
-
-    // Sanitize – only basename allowed (prevent path traversal)
-    const safeName = path.basename(filename);
-    const entry = await prisma.entry.findFirst({
-      where: { filePath: { endsWith: safeName } },
-    });
-
-    if (!entry || !entry.filePath) return res.status(404).json({ error: 'File not found' });
-    if (!fs.existsSync(entry.filePath)) return res.status(404).json({ error: 'File missing on disk' });
-
-    res.setHeader('Content-Type', entry.fileMime || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(entry.fileName || safeName)}"`);
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'private, no-cache');
-
-    fs.createReadStream(entry.filePath).pipe(res);
-  } catch (err) {
-    next(err);
-  }
-};
-
-// ─── Controller: Get All (search/list) ───────────────────────────────────────
-const getEntries = async (req, res, next) => {
-  try {
-    const { q, page = 1, limit = 20 } = req.query;
-    const where = q
-      ? {
-          OR: [
-            { memoNumber: { contains: q.toUpperCase(), mode: 'insensitive' } },
-            { senderName: { contains: q, mode: 'insensitive' } },
-            { senderCode: { contains: q.toUpperCase(), mode: 'insensitive' } },
-            { receiverName: { contains: q, mode: 'insensitive' } },
-            { purpose: { contains: q, mode: 'insensitive' } },
-          ],
+              mode:
+                "insensitive",
+            },
+          },
         }
-      : {};
+      );
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const [entries, total] = await Promise.all([
-      prisma.entry.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: parseInt(limit),
-      }),
-      prisma.entry.count({ where }),
-    ]);
+    if (purpose) {
+      return purpose;
+    }
 
-    res.json({
-      entries,
-      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) },
-    });
+    /*
+    GENERATE CODE
+    */
+
+    const code =
+      await generatePurposeCode(
+        cleanName
+      );
+
+    /*
+    CREATE
+    */
+
+    purpose =
+      await prisma.purpose.create(
+        {
+          data: {
+            name:
+              cleanName,
+
+            code,
+          },
+        }
+      );
+
+    return purpose;
   } catch (err) {
-    next(err);
-  }
-};
+    console.error(
+      "GET OR CREATE PURPOSE ERROR:",
+      err
+    );
 
-module.exports = { createEntry, getEntriesByDate, getSlOptions, getEntryFile, getEntries };
+    throw err;
+  }
+}
+
+/*
+──────────────────────────────────────
+CREATE ENTRY
+──────────────────────────────────────
+*/
+
+const createEntry =
+  async (req, res) => {
+    try {
+      const {
+        slNo,
+        receiverCompany,
+        purpose,
+        description,
+        date,
+      } = req.body;
+
+      /*
+      VALIDATION
+      */
+
+      if (
+        !slNo ||
+        !receiverCompany ||
+        !purpose ||
+        !date
+      ) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Missing required fields",
+          });
+      }
+
+      /*
+      ACTIVE COMPANY
+      */
+
+      const activeCompanyId =
+        req.user
+          .activeCompanyId;
+
+      if (
+        !activeCompanyId
+      ) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "No active company selected",
+          });
+      }
+
+      /*
+      SENDER COMPANY
+      */
+
+      const sender =
+        await prisma.company.findUnique(
+          {
+            where: {
+              id:
+                activeCompanyId,
+            },
+          }
+        );
+
+      if (!sender) {
+        return res
+          .status(404)
+          .json({
+            error:
+              "Sender company not found",
+          });
+      }
+
+      /*
+      SL EXISTS
+      */
+
+      const existingSl =
+        await prisma.entry.findFirst(
+          {
+            where: {
+              slNo:
+                Number(slNo),
+
+              senderCompanyId:
+                sender.id,
+            },
+          }
+        );
+
+      if (existingSl) {
+        return res
+          .status(409)
+          .json({
+            error:
+              "SL Number already exists",
+          });
+      }
+
+      /*
+      RECEIVER COMPANY
+      */
+
+      const receiver =
+        await getOrCreateCompany(
+          receiverCompany
+        );
+
+      /*
+      PURPOSE
+      */
+
+      const purposeData =
+        await getOrCreatePurpose(
+          purpose
+        );
+
+      /*
+      SEND COUNT
+      HOW MANY TIMES
+      SENDER SENT TO RECEIVER
+      */
+
+      const existingCount =
+        await prisma.entry.count(
+          {
+            where: {
+              senderCompanyId:
+                sender.id,
+
+              receiverCompanyId:
+                receiver.id,
+            },
+          }
+        );
+
+      const sendCount =
+        existingCount + 1;
+
+      /*
+      MEMO NUMBER
+
+      EXAMPLE:
+      03/DHPE/PNBR/TES/04
+      */
+
+      const memoNumber =
+        `${String(slNo).padStart(2, "0")}/` +
+        `${sender.code}/` +
+        `${receiver.code}/` +
+        `${purposeData.code}/` +
+        `${String(sendCount).padStart(2, "0")}`;
+
+      /*
+      SAFE DATE
+      */
+
+      const [
+        year,
+        month,
+        day,
+      ] = date
+        .split("-")
+        .map(Number);
+
+      const safeDate =
+        new Date(
+          Date.UTC(
+            year,
+            month - 1,
+            day
+          )
+        );
+
+      /*
+      CREATE ENTRY
+      */
+
+      const entry =
+        await prisma.entry.create(
+          {
+            data: {
+              slNo:
+                Number(slNo),
+
+              memoNumber,
+
+              senderCompanyId:
+                sender.id,
+
+              receiverCompanyId:
+                receiver.id,
+
+              purposeId:
+                purposeData.id,
+
+              sendCount,
+
+              description,
+
+              date:
+                safeDate,
+            },
+
+            include: {
+              senderCompany: true,
+
+              receiverCompany: true,
+
+              purpose: true,
+            },
+          }
+        );
+
+      return res.json({
+        success: true,
+
+        message:
+          "Entry created successfully",
+
+        entry,
+      });
+    } catch (err) {
+      console.error(
+        "CREATE ENTRY ERROR:",
+        err
+      );
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+
+          error:
+            err.message ||
+            "Failed to create entry",
+        });
+    }
+  };
+
+/*
+──────────────────────────────────────
+GET ENTRIES
+──────────────────────────────────────
+*/
+
+const getEntries =
+  async (req, res) => {
+    try {
+      let where = {};
+
+      /*
+      EMPLOYEE
+      */
+
+      if (
+        req.user.role ===
+        "EMPLOYEE"
+      ) {
+        where = {
+          senderCompanyId:
+            req.user
+              .companyId,
+        };
+      }
+
+      /*
+      ADMIN / SUPER ADMIN
+      */
+
+      else if (
+        req.user
+          .activeCompanyId
+      ) {
+        where = {
+          senderCompanyId:
+            req.user
+              .activeCompanyId,
+        };
+      }
+
+      const entries =
+        await prisma.entry.findMany(
+          {
+            where,
+
+            orderBy: {
+              createdAt:
+                "desc",
+            },
+
+            include: {
+              senderCompany: true,
+
+              receiverCompany: true,
+
+              purpose: true,
+            },
+          }
+        );
+
+      return res.json({
+        entries,
+      });
+    } catch (err) {
+      console.error(err);
+
+      return res
+        .status(500)
+        .json({
+          error:
+            "Failed to fetch entries",
+        });
+    }
+  };
+
+/*
+──────────────────────────────────────
+SEARCH COMPANY
+──────────────────────────────────────
+*/
+
+const searchCompanies =
+  async (req, res) => {
+    try {
+      const q =
+        req.query.q || "";
+
+      const companies =
+        await prisma.company.findMany(
+          {
+            where: {
+              OR: [
+                {
+                  name: {
+                    contains:
+                      q,
+
+                    mode:
+                      "insensitive",
+                  },
+                },
+
+                {
+                  code: {
+                    contains:
+                      q,
+
+                    mode:
+                      "insensitive",
+                  },
+                },
+              ],
+            },
+
+            take: 10,
+
+            orderBy: {
+              createdAt:
+                "desc",
+            },
+          }
+        );
+
+      return res.json({
+        companies,
+      });
+    } catch (err) {
+      console.error(err);
+
+      return res
+        .status(500)
+        .json({
+          error:
+            "Failed to search companies",
+        });
+    }
+  };
+
+  /*
+──────────────────────────────────────
+SEARCH ENTRIES
+──────────────────────────────────────
+*/
+
+const searchEntries =
+  async (req, res) => {
+    try {
+      const limit =
+        Number(
+          req.query.limit
+        ) || 500;
+
+      let where = {};
+
+      /*
+      EMPLOYEE
+      */
+
+      if (
+        req.user.role ===
+        "EMPLOYEE"
+      ) {
+        where.senderCompanyId =
+          req.user.companyId;
+      }
+
+      /*
+      ADMIN / SUPER ADMIN
+      */
+
+      else if (
+        req.user
+          .activeCompanyId
+      ) {
+        where.senderCompanyId =
+          req.user
+            .activeCompanyId;
+      }
+
+      const entries =
+        await prisma.entry.findMany(
+          {
+            where,
+
+            take: limit,
+
+            orderBy: {
+              createdAt:
+                "desc",
+            },
+
+            include: {
+              senderCompany: true,
+
+              receiverCompany: true,
+
+              purpose: true,
+            },
+          }
+        );
+
+      return res.json({
+        entries,
+      });
+    } catch (err) {
+      console.error(
+        "SEARCH ENTRIES ERROR:",
+        err
+      );
+
+      return res
+        .status(500)
+        .json({
+          error:
+            "Failed to search entries",
+        });
+    }
+  };
+
+/*
+──────────────────────────────────────
+AVAILABLE SL
+──────────────────────────────────────
+*/
+
+const getAvailableSlNumbers =
+  async (req, res) => {
+    try {
+      const activeCompanyId =
+        req.user
+          .activeCompanyId;
+
+      const entries =
+        await prisma.entry.findMany(
+          {
+            where: {
+              senderCompanyId:
+                activeCompanyId,
+            },
+
+            select: {
+              slNo: true,
+            },
+          }
+        );
+
+      return res.json({
+        used:
+          entries.map(
+            (e) => e.slNo
+          ),
+      });
+    } catch (err) {
+      console.error(err);
+
+      return res
+        .status(500)
+        .json({
+          error:
+            "Failed to fetch serials",
+        });
+    }
+  };
+
+  /*
+──────────────────────────────────────
+GET ENTRIES BY DATE
+──────────────────────────────────────
+*/
+
+const getEntriesByDate =
+  async (req, res) => {
+    try {
+      const { date } =
+        req.query;
+
+      if (!date) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Date is required",
+          });
+      }
+
+      /*
+      DATE
+      */
+
+      const [
+        year,
+        month,
+        day,
+      ] = date
+        .split("-")
+        .map(Number);
+
+      const targetDate =
+        new Date(
+          Date.UTC(
+            year,
+            month - 1,
+            day
+          )
+        );
+
+      let where = {
+        date: targetDate,
+      };
+
+      /*
+      EMPLOYEE
+      */
+
+      if (
+        req.user.role ===
+        "EMPLOYEE"
+      ) {
+        where.senderCompanyId =
+          req.user.companyId;
+      }
+
+      /*
+      ADMIN / SUPER ADMIN
+      */
+
+      else if (
+        req.user
+          .activeCompanyId
+      ) {
+        where.senderCompanyId =
+          req.user
+            .activeCompanyId;
+      }
+
+      /*
+      FIND
+      */
+
+      const entries =
+        await prisma.entry.findMany(
+          {
+            where,
+
+            include: {
+              senderCompany: true,
+
+              receiverCompany: true,
+
+              purpose: true,
+            },
+
+            orderBy: {
+              slNo: "asc",
+            },
+          }
+        );
+
+      return res.json({
+        entries,
+      });
+    } catch (err) {
+      console.error(
+        "GET ENTRIES BY DATE ERROR:",
+        err
+      );
+
+      return res
+        .status(500)
+        .json({
+          error:
+            "Failed to fetch entries",
+        });
+    }
+  };
+
+/*
+──────────────────────────────────────
+UPLOAD FILE
+──────────────────────────────────────
+*/
+
+const uploadEntryFile =
+  async (req, res) => {
+    try {
+      const { id } =
+        req.params;
+
+      if (!req.file) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "No file uploaded",
+          });
+      }
+
+      const entry =
+        await prisma.entry.update(
+          {
+            where: { id },
+
+            data: {
+              fileUrl:
+                req.file.path,
+
+              fileName:
+                req.file
+                  .originalname,
+
+              fileMime:
+                req.file
+                  .mimetype,
+            },
+          }
+        );
+
+      return res.json({
+        success: true,
+
+        entry,
+      });
+    } catch (err) {
+      console.error(err);
+
+      return res
+        .status(500)
+        .json({
+          error:
+            "Failed to upload file",
+        });
+    }
+  };
+
+/*
+──────────────────────────────────────
+DELETE FILE
+──────────────────────────────────────
+*/
+
+const deleteEntryFile =
+  async (req, res) => {
+    try {
+      if (
+        req.user.role !==
+        "SUPER_ADMIN"
+      ) {
+        return res
+          .status(403)
+          .json({
+            error:
+              "Only super admin can delete files",
+          });
+      }
+
+      const { id } =
+        req.params;
+
+      const entry =
+        await prisma.entry.update(
+          {
+            where: { id },
+
+            data: {
+              fileUrl: null,
+
+              fileName: null,
+
+              fileMime: null,
+            },
+          }
+        );
+
+      return res.json({
+        success: true,
+
+        entry,
+      });
+    } catch (err) {
+      console.error(err);
+
+      return res
+        .status(500)
+        .json({
+          error:
+            "Failed to delete file",
+        });
+    }
+  };
+
+module.exports = {
+  createEntry,
+
+  getEntries,
+
+  getEntriesByDate,
+
+  getAvailableSlNumbers,
+
+  searchCompanies,
+
+  searchEntries,
+
+  uploadEntryFile,
+
+  deleteEntryFile,
+};

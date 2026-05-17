@@ -1,84 +1,423 @@
+
 // server.js
-require('dotenv').config();
-const express = require('express');
-const helmet = require('helmet');
-const cors = require('cors');
-const cookieParser = require('cookie-parser');
-const compression = require('compression');
-const path = require('path');
 
-const authRoutes = require('./routes/auth.routes');
-const memoRoutes = require('./routes/memo.routes');
-const activityRoutes = require('./routes/activity.routes');
-const fileRoutes = require('./routes/file.routes');
-const calendarRoutes = require('./routes/calendar.routes');
-const { globalRateLimiter } = require('./middleware/rateLimiter');
-const { errorHandler } = require('./middleware/errorHandler');
-const entryRoutes = require('./routes/entry.routes');
+require("dotenv").config();
 
+const express =
+  require("express");
 
-const app = express();
-const PORT = process.env.PORT || 5001;
+const helmet =
+  require("helmet");
 
-// ─── Security Middleware ──────────────────────────────────────────────────────
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:"],
-      connectSrc: ["'self'"],
-      fontSrc: ["'self'"],
-      objectSrc: ["'none'"],
-      mediaSrc: ["'self'"],
-      frameSrc: ["'none'"],
-    },
+const cors =
+  require("cors");
+
+const cookieParser =
+  require("cookie-parser");
+
+const compression =
+  require("compression");
+
+/*
+──────────────────────────────────────
+ROUTES
+──────────────────────────────────────
+*/
+
+const authRoutes =
+  require("./routes/auth.routes");
+
+const memoRoutes =
+  require("./routes/memo.routes");
+
+const activityRoutes =
+  require("./routes/activity.routes");
+
+const fileRoutes =
+  require("./routes/file.routes");
+
+const calendarRoutes =
+  require("./routes/calendar.routes");
+
+const entryRoutes =
+  require("./routes/entry.routes");
+
+const companyRoutes =
+  require("./routes/company.routes");
+
+const purposeRoutes =
+  require("./routes/purpose.routes");
+
+/*
+──────────────────────────────────────
+MIDDLEWARE
+──────────────────────────────────────
+*/
+
+const {
+  globalRateLimiter,
+} = require(
+  "./middleware/rateLimiter"
+);
+
+const {
+  errorHandler,
+} = require(
+  "./middleware/errorHandler"
+);
+
+/*
+──────────────────────────────────────
+APP
+──────────────────────────────────────
+*/
+
+const app =
+  express();
+
+const PORT =
+  process.env.PORT ||
+  5001;
+
+/*
+──────────────────────────────────────
+TRUST PROXY
+IMPORTANT FOR RENDER
+──────────────────────────────────────
+*/
+
+app.set(
+  "trust proxy",
+  1
+);
+
+/*
+──────────────────────────────────────
+ALLOWED ORIGINS
+──────────────────────────────────────
+*/
+
+const allowedOrigins =
+  [
+    "http://localhost:5173",
+
+    "http://127.0.0.1:5173",
+
+    "https://document-store-frontend.vercel.app",
+  ];
+
+/*
+──────────────────────────────────────
+HELMET
+──────────────────────────────────────
+*/
+
+app.use(
+  helmet({
+    crossOriginEmbedderPolicy:
+      false,
+
+    contentSecurityPolicy:
+      false,
+  })
+);
+
+/*
+──────────────────────────────────────
+CORS
+IMPORTANT
+──────────────────────────────────────
+*/
+
+const corsOptions = {
+  /*
+  ORIGIN
+  */
+
+  origin: function (
+    origin,
+    callback
+  ) {
+    /*
+    NO ORIGIN
+    */
+
+    if (!origin) {
+      return callback(
+        null,
+        true
+      );
+    }
+
+    /*
+    ALLOWED
+    */
+
+    if (
+      allowedOrigins.includes(
+        origin
+      )
+    ) {
+      return callback(
+        null,
+        true
+      );
+    }
+
+    /*
+    BLOCKED
+    */
+
+    console.error(
+      "❌ Blocked by CORS:",
+      origin
+    );
+
+    return callback(
+      new Error(
+        "Not allowed by CORS"
+      )
+    );
   },
-  crossOriginEmbedderPolicy: false,
-}));
 
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  /*
+  COOKIE
+  */
+
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
 
-// ─── General Middleware ───────────────────────────────────────────────────────
-app.use(compression());
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ extended: true, limit: '10kb' }));
-app.use(cookieParser());
+  /*
+  METHODS
+  */
 
-// ─── Rate Limiting ────────────────────────────────────────────────────────────
-app.use('/api/', globalRateLimiter);
+  methods: [
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+  ],
 
-// ─── Routes ───────────────────────────────────────────────────────────────────
-app.use('/api/auth', authRoutes);
-app.use('/api/memos', memoRoutes);
-app.use('/api/activities', activityRoutes);
-app.use('/api/files', fileRoutes);
-app.use('/api/calendar', calendarRoutes);
-app.use('/api/entry', entryRoutes);
+  /*
+  IMPORTANT
+  CUSTOM HEADERS
+  */
 
-// ─── Health Check ─────────────────────────────────────────────────────────────
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+  allowedHeaders: [
+    "Content-Type",
 
-// ─── 404 Handler ──────────────────────────────────────────────────────────────
-app.use('*', (req, res) => {
-  res.status(404).json({ error: 'Route not found' });
-});
+    "Authorization",
 
-// ─── Error Handler ────────────────────────────────────────────────────────────
-app.use(errorHandler);
+    "x-company-id",
+  ],
+};
 
-// ─── Start Server ─────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`🚀 Secure CalDoc server running on port ${PORT}`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-});
+/*
+──────────────────────────────────────
+ENABLE CORS
+──────────────────────────────────────
+*/
 
-module.exports = app;
+app.use(
+  cors(corsOptions)
+);
+
+/*
+──────────────────────────────────────
+PREFLIGHT
+IMPORTANT
+──────────────────────────────────────
+*/
+
+app.options(
+  "*",
+  cors(corsOptions)
+);
+
+/*
+──────────────────────────────────────
+GENERAL MIDDLEWARE
+──────────────────────────────────────
+*/
+
+app.use(
+  compression()
+);
+
+app.use(
+  express.json({
+    limit: "25mb",
+  })
+);
+
+app.use(
+  express.urlencoded({
+    extended: true,
+
+    limit: "25mb",
+  })
+);
+
+app.use(
+  cookieParser()
+);
+
+/*
+──────────────────────────────────────
+RATE LIMIT
+──────────────────────────────────────
+*/
+
+app.use(
+  "/api/",
+  globalRateLimiter
+);
+
+/*
+──────────────────────────────────────
+ROUTES
+──────────────────────────────────────
+*/
+
+app.use(
+  "/api/auth",
+  authRoutes
+);
+
+app.use(
+  "/api/memos",
+  memoRoutes
+);
+
+app.use(
+  "/api/activities",
+  activityRoutes
+);
+
+app.use(
+  "/api/files",
+  fileRoutes
+);
+
+app.use(
+  "/api/calendar",
+  calendarRoutes
+);
+
+app.use(
+  "/api/entry",
+  entryRoutes
+);
+
+app.use(
+  "/api/companies",
+  companyRoutes
+);
+
+app.use(
+  "/api/purposes",
+  purposeRoutes
+);
+
+/*
+──────────────────────────────────────
+HEALTH
+──────────────────────────────────────
+*/
+
+app.get(
+  "/api/health",
+  (
+    req,
+    res
+  ) => {
+    return res.json({
+      success: true,
+
+      status: "ok",
+
+      environment:
+        process.env
+          .NODE_ENV ||
+        "development",
+
+      timestamp:
+        new Date().toISOString(),
+    });
+  }
+);
+
+/*
+──────────────────────────────────────
+ROOT
+──────────────────────────────────────
+*/
+
+app.get(
+  "/",
+  (
+    req,
+    res
+  ) => {
+    res.json({
+      app: "Secure CalDoc API",
+
+      status: "running",
+    });
+  }
+);
+
+/*
+──────────────────────────────────────
+404
+──────────────────────────────────────
+*/
+
+app.use(
+  "*",
+  (
+    req,
+    res
+  ) => {
+    res.status(404).json({
+      error:
+        "Route not found",
+    });
+  }
+);
+
+/*
+──────────────────────────────────────
+ERROR HANDLER
+──────────────────────────────────────
+*/
+
+app.use(
+  errorHandler
+);
+
+/*
+──────────────────────────────────────
+START
+──────────────────────────────────────
+*/
+
+app.listen(
+  PORT,
+  () => {
+    console.log(`
+🚀 Secure CalDoc API Running
+🌍 PORT: ${PORT}
+🛡️ ENV: ${
+      process.env
+        .NODE_ENV ||
+      "development"
+    }
+    `);
+  }
+);
+
+module.exports =
+  app;
+

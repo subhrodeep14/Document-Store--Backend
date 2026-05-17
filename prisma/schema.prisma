@@ -1,5 +1,3 @@
-// prisma/schema.prisma
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -13,98 +11,74 @@ model User {
   id        String   @id @default(uuid())
   email     String   @unique
   password  String
-  role      String   @default("admin")
+  role      String   @default("EMPLOYEE")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  companyId String?
+  name      String?
+  company   Company? @relation(fields: [companyId], references: [id])
 
+  @@index([companyId])
+  @@index([role])
   @@map("users")
 }
 
-model Memo {
-  id          String   @id @default(uuid())
-  memoNumber  String   @unique
-  title       String
-  description String?  @db.Text
-  date        DateTime @db.Date
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  attachments File[]
+model Company {
+  id              String   @id @default(cuid())
+  name            String   @unique
+  code            String   @unique
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  adminCode       String   @unique
+  employeeCode    String   @unique
+  receivedEntries Entry[]  @relation("ReceiverCompany")
+  sentEntries     Entry[]  @relation("SenderCompany")
+  users           User[]
 
-  @@index([date])
-  @@map("memos")
+  @@index([name])
+  @@index([code])
+  @@index([adminCode])
+  @@index([employeeCode])
+  @@map("companies")
 }
 
-model Activity {
-  id          String   @id @default(uuid())
-  date        DateTime @db.Date
-  title       String
-  description String?  @db.Text
-  startTime   String?
-  endTime     String?
-  type        String   @default("general") // general | meeting | task | note
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+model Purpose {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  code      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  entries   Entry[]
 
-  @@index([date])
-  @@map("activities")
-}
-
-model File {
-  id           String   @id @default(uuid())
-  originalName String
-  storedName   String   @unique
-  mimeType     String
-  size         Int
-  path         String
-  linkedDate   DateTime @db.Date
-  memoId       String?
-  memo         Memo?    @relation(fields: [memoId], references: [id], onDelete: Cascade)
-  uploadedAt   DateTime @default(now())
-
-  @@index([linkedDate])
-  @@index([memoId])
-  @@map("files")
-}
-
-model MemoCounter {
-  id    String   @id @default(uuid())
-  date  DateTime @db.Date @unique
-  count Int      @default(0)
-
-  @@index([date])
-  @@map("memo_counters")
+  @@index([name])
+  @@index([code])
+  @@map("purposes")
 }
 
 model Entry {
-  id          String   @id @default(uuid())
-  slNo        Int      @unique
-  memoNumber  String   @unique
-  senderName  String
-  senderCode  String
-  receiverName String
-  receiverCode String
-  purpose     String
-  description String   @db.Text
-  sendCount   Int      @default(1)
-  fileUrl     String?
-  filePath    String?
-  fileName    String?
-  fileMime    String?
-  date        DateTime @db.Date
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                String   @id @default(cuid())
+  slNo              Int      @unique
+  memoNumber        String   @unique
+  senderCompanyId   String
+  receiverCompanyId String
+  purposeId         String
+  sendCount         Int      @default(1)
+  description       String?
+  fileUrl           String?
+  fileName          String?
+  fileMime          String?
+  date              DateTime @db.Date
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  purpose           Purpose  @relation(fields: [purposeId], references: [id], onDelete: Cascade)
+  receiverCompany   Company  @relation("ReceiverCompany", fields: [receiverCompanyId], references: [id], onDelete: Cascade)
+  senderCompany     Company  @relation("SenderCompany", fields: [senderCompanyId], references: [id], onDelete: Cascade)
 
-  @@index([date])
-  @@index([senderCode])
-  @@index([receiverCode])
   @@index([slNo])
+  @@index([date])
+  @@index([memoNumber])
+  @@index([senderCompanyId])
+  @@index([receiverCompanyId])
+  @@index([purposeId])
   @@map("entries")
-}
-
-model SlCounter {
-  id    String @id @default(uuid())
-  value Int    @unique
-  usedAt DateTime @default(now())
-
-  @@map("sl_counters")
 }

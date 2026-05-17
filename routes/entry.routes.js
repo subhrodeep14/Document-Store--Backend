@@ -1,37 +1,207 @@
-// backend/routes/entry.routes.js
-'use strict';
+"use strict";
 
-const express = require('express');
-const router = express.Router();
+const express =
+  require("express");
+
+const router =
+  express.Router();
 
 const {
   createEntry,
-  getEntriesByDate,
-  getSlOptions,
-  getEntryFile,
+
   getEntries,
-} = require('../controllers/entry.controller');
 
-const { authenticate } = require('../middleware/auth.middleware');
-const entryUpload = require('../middleware/entryUpload');
-const { uploadRateLimiter } = require('../middleware/rateLimiter');
+  searchCompanies,
 
-// All routes require auth
-router.use(authenticate);
+  getEntriesByDate,
+  searchEntries,
+  getAvailableSlNumbers,
 
-// SL number options (for the modal dropdown)
-router.get('/sl-options', getSlOptions);
+  uploadEntryFile,
 
-// List / search entries
-router.get('/', getEntries);
+  deleteEntryFile,
+} = require(
+  "../controllers/entry.controller"
+);
 
-// Entries by date (for DayPanel)
-router.get('/by-date', getEntriesByDate);
+const {
+  authenticate,
 
-// Create entry (with optional file upload)
-router.post('/create', uploadRateLimiter, entryUpload.single('file'), createEntry);
+  allowRoles,
+} = require(
+  "../middleware/auth.middleware"
+);
 
-// Serve file securely (auth already applied above)
-router.get('/file/:filename', getEntryFile);
+const entryUpload =
+  require(
+    "../middleware/entryUpload"
+  );
 
-module.exports = router;
+const {
+  uploadRateLimiter,
+} = require(
+  "../middleware/rateLimiter"
+);
+
+/*
+──────────────────────────────────────
+PROTECTED
+──────────────────────────────────────
+*/
+
+router.use(
+  authenticate
+);
+
+/*
+──────────────────────────────────────
+CREATE ENTRY
+──────────────────────────────────────
+*/
+
+router.post(
+  "/create",
+
+  uploadRateLimiter,
+
+  allowRoles(
+    "SUPER_ADMIN",
+    "ADMIN",
+    "EMPLOYEE"
+  ),
+
+  createEntry
+);
+
+/*
+──────────────────────────────────────
+GET ENTRIES
+──────────────────────────────────────
+*/
+
+router.get(
+  "/",
+
+  allowRoles(
+    "SUPER_ADMIN",
+    "ADMIN",
+    "EMPLOYEE"
+  ),
+
+  getEntries
+);
+
+/*
+──────────────────────────────────────
+SEARCH ENTRIES
+──────────────────────────────────────
+*/
+
+router.get(
+  "/search",
+
+  allowRoles(
+    "SUPER_ADMIN",
+    "ADMIN",
+    "EMPLOYEE"
+  ),
+
+  searchEntries
+);
+
+/*
+──────────────────────────────────────
+GET ENTRIES BY DATE
+──────────────────────────────────────
+*/
+
+router.get(
+  "/by-date",
+
+  allowRoles(
+    "SUPER_ADMIN",
+    "ADMIN",
+    "EMPLOYEE"
+  ),
+
+  getEntriesByDate
+);
+
+/*
+──────────────────────────────────────
+AVAILABLE SL NUMBERS
+──────────────────────────────────────
+*/
+
+router.get(
+  "/sl-numbers",
+
+  allowRoles(
+    "SUPER_ADMIN",
+    "ADMIN",
+    "EMPLOYEE"
+  ),
+
+  getAvailableSlNumbers
+);
+
+/*
+──────────────────────────────────────
+SEARCH COMPANIES
+──────────────────────────────────────
+*/
+
+router.get(
+  "/companies/search",
+
+  allowRoles(
+    "SUPER_ADMIN",
+    "ADMIN",
+    "EMPLOYEE"
+  ),
+
+  searchCompanies
+);
+
+/*
+──────────────────────────────────────
+UPLOAD FILE
+──────────────────────────────────────
+*/
+
+router.post(
+  "/upload-file/:id",
+
+  uploadRateLimiter,
+
+  allowRoles(
+    "SUPER_ADMIN",
+    "ADMIN",
+    "EMPLOYEE"
+  ),
+
+  entryUpload.single(
+    "file"
+  ),
+
+  uploadEntryFile
+);
+
+/*
+──────────────────────────────────────
+DELETE FILE
+──────────────────────────────────────
+*/
+
+router.delete(
+  "/delete-file/:id",
+
+  allowRoles(
+    "SUPER_ADMIN"
+  ),
+
+  deleteEntryFile
+);
+
+module.exports =
+  router;

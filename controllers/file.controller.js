@@ -1,126 +1,333 @@
-// controllers/file.controller.js (CLOUDINARY VERSION)
+// controllers/file.controller.js
 
-const { PrismaClient } = require('@prisma/client');
-const multer = require('multer');
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const cloudinary = require('cloudinary').v2;
-const { isDateLocked } = require('../utils/dateUtils');
+const {
+  PrismaClient,
+} = require('@prisma/client');
 
-const prisma = new PrismaClient();
+const multer =
+  require('multer');
 
-// 🔥 Cloudinary config
+const {
+  CloudinaryStorage,
+} = require(
+  'multer-storage-cloudinary'
+);
+
+const cloudinary =
+  require('cloudinary').v2;
+
+const {
+  isDateLocked,
+} = require(
+  '../utils/dateUtils'
+);
+
+const prisma =
+  new PrismaClient();
+
+/**
+ * CLOUDINARY CONFIG
+ */
+
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
+  cloud_name:
+    process.env
+      .CLOUDINARY_CLOUD_NAME,
+
+  api_key:
+    process.env
+      .CLOUDINARY_API_KEY,
+
+  api_secret:
+    process.env
+      .CLOUDINARY_API_SECRET,
 });
 
-// 🔥 Storage (NO local disk)
-const storage = new CloudinaryStorage({
-  cloudinary,
-  params: {
-    folder: 'secure-caldoc',
-    resource_type: 'raw', // PDF support
-    format: async () => 'pdf',
-    public_id: (req, file) => `file-${Date.now()}`,
-  },
-});
+/**
+ * STORAGE
+ */
+const storage =
+  new CloudinaryStorage({
+    cloudinary,
+
+    params: {
+      folder:
+        'entry-files',
+
+      resource_type:
+        'image',
+
+      format: 'pdf',
+
+      public_id: (
+        req,
+        file
+      ) =>
+        `entry-${Date.now()}`,
+    },
+  });
+
+/**
+ * MULTER
+ */
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
+
+  limits: {
+    fileSize:
+      10 * 1024 * 1024,
+  },
 });
 
-// 🚀 Upload file
-const uploadFile = async (req, res, next) => {
+/**
+ * UPLOAD FILE
+ */
+
+const uploadFile =
+  async (req, res, next) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          error:
+            'No file uploaded',
+        });
+      }
+
+      const {
+        date,
+        memoId,
+      } = req.body;
+
+      if (!date) {
+        return res.status(400).json({
+          error:
+            'Date required',
+        });
+      }
+
+      const entryDate =
+        new Date(
+          `${date}T12:00:00`
+        );
+
+      if (
+        isDateLocked(
+          entryDate
+        )
+      ) {
+        return res.status(403).json({
+          error:
+            'Date locked',
+        });
+      }
+
+      const fileRecord =
+        await prisma.file.create({
+          data: {
+            originalName:
+              req.file
+                .originalname,
+
+            // SAVE CLOUDINARY PUBLIC ID
+
+            storedName:
+              req.file
+                .filename ||
+              req.file
+                .public_id ||
+              `file-${Date.now()}`,
+
+            mimeType:
+              req.file
+                .mimetype,
+
+            size:
+              req.file.size,
+
+            // CLOUDINARY URL
+
+            path:
+              req.file.path,
+
+            linkedDate:
+              entryDate,
+
+            memoId:
+              memoId ||
+              null,
+          },
+        });
+
+      res.status(201).json({
+        success: true,
+
+        file: {
+          id: fileRecord.id,
+
+          url:
+            fileRecord.path,
+
+          originalName:
+            fileRecord.originalName,
+        },
+      });
+    } catch (err) {
+      console.log(err);
+
+      next(err);
+    }
+  };
+
+/**
+ * VIEW FILE
+ */
+
+const getFile = async (
+  req,
+  res,
+  next
+) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
+    const file =
+      await prisma.file.findUnique({
+        where: {
+          id: req.params.id,
+        },
+      });
+
+    if (!file) {
+      return res.status(404).json({
+        error:
+          'Not found',
+      });
     }
 
-    const { date, memoId } = req.body;
+    // FORCE INLINE PDF VIEW
 
-    if (!date) return res.status(400).json({ error: 'Date required' });
+    const viewUrl =
+      file.path.replace(
+        '/upload/',
+        '/upload/fl_attachment:false/'
+      );
 
-    const entryDate = new Date(date);
-    if (isDateLocked(entryDate)) {
-      return res.status(403).json({ error: 'Date locked' });
+    return res.redirect(
+      viewUrl
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET FILES BY DATE
+ */
+
+const getFilesByDate =
+  async (req, res, next) => {
+    try {
+      const { date } =
+        req.query;
+
+      if (!date) {
+        return res.status(400).json({
+          error:
+            'Date required',
+        });
+      }
+
+      const start =
+        new Date(
+          `${date}T00:00:00`
+        );
+
+      const end =
+        new Date(
+          `${date}T23:59:59`
+        );
+
+      const files =
+        await prisma.file.findMany({
+          where: {
+            linkedDate: {
+              gte: start,
+              lte: end,
+            },
+          },
+
+          orderBy: {
+            uploadedAt:
+              'desc',
+          },
+        });
+
+      res.json({
+        files,
+      });
+    } catch (err) {
+      next(err);
     }
+  };
 
-    const fileRecord = await prisma.file.create({
-      data: {
-        originalName: req.file.originalname,
-        mimeType: req.file.mimetype,
-        size: req.file.size,
-        path: req.file.path, // 🔥 Cloudinary URL
-        linkedDate: entryDate,
-        memoId: memoId || null,
-      },
-    });
+/**
+ * DELETE FILE
+ */
 
-    res.status(201).json({
-      file: {
-        id: fileRecord.id,
-        url: fileRecord.path,
-        originalName: fileRecord.originalName,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
-};
+const deleteFile =
+  async (req, res, next) => {
+    try {
+      const file =
+        await prisma.file.findUnique({
+          where: {
+            id: req.params.id,
+          },
+        });
 
-// 🚀 Get file (just redirect)
-const getFile = async (req, res, next) => {
-  try {
-    const file = await prisma.file.findUnique({
-      where: { id: req.params.id },
-    });
+      if (!file) {
+        return res.status(404).json({
+          error:
+            'Not found',
+        });
+      }
 
-    if (!file) return res.status(404).json({ error: 'Not found' });
+      /**
+       * DELETE FROM CLOUDINARY
+       */
 
-    return res.redirect(file.path); // 🔥 direct Cloudinary
-  } catch (err) {
-    next(err);
-  }
-};
+      if (
+        file.storedName
+      ) {
+        await cloudinary.uploader.destroy(
+          `secure-caldoc/${file.storedName}`,
+          {
+            resource_type:
+              'raw',
+          }
+        );
+      }
 
-// 🚀 Get files by date
-const getFilesByDate = async (req, res, next) => {
-  try {
-    const files = await prisma.file.findMany({
-      where: { linkedDate: new Date(req.query.date) },
-      orderBy: { uploadedAt: 'desc' },
-    });
+      /**
+       * DELETE FROM DB
+       */
 
-    res.json({ files });
-  } catch (err) {
-    next(err);
-  }
-};
+      await prisma.file.delete({
+        where: {
+          id: file.id,
+        },
+      });
 
-// 🚀 Delete file (Cloudinary + DB)
-const deleteFile = async (req, res, next) => {
-  try {
-    const file = await prisma.file.findUnique({
-      where: { id: req.params.id },
-    });
+      res.json({
+        success: true,
 
-    if (!file) return res.status(404).json({ error: 'Not found' });
+        message:
+          'Deleted successfully',
+      });
+    } catch (err) {
+      console.log(err);
 
-    // delete from cloudinary
-    const publicId = file.path.split('/').pop().split('.')[0];
-    await cloudinary.uploader.destroy(`secure-caldoc/${publicId}`, {
-      resource_type: 'raw',
-    });
-
-    await prisma.file.delete({ where: { id: file.id } });
-
-    res.json({ message: 'Deleted' });
-  } catch (err) {
-    next(err);
-  }
-};
+      next(err);
+    }
+  };
 
 module.exports = {
   upload,
